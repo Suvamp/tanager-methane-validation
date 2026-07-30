@@ -1,0 +1,30 @@
+# Data — the raw scene is 600 MB and re-downloadable via notebook 01;
+# the ERA5 GRIB requires the user's own CDS credentials to fetch.
+data/raw/
+data/reference/*.grib
+data/reference/*.idx
+# HITRAN line-data cache — re-fetched from hitran.org on first run
+data/reference/hitran/
+
+# Credentials — never commit CDS/EPA keys
+.cdsapirc
+*.cdsapirc
+.env
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+tanager_env/
+
+# Personal / submission paperwork (keep out of the public repo)
+Tanager Open Data Competition Submission Survey.pdf
+*.docx
+
+# Internal review notes — not part of the public submission
+CLAUDE.md
+data/processed/emission_estimates_20241121.csv
