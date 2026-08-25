@@ -208,6 +208,176 @@ def threshold_mask(mf_map, n_sigma=2.0, smooth_sigma=1.5):
     return smooth > thr, thr
 
 
+def ledoit_wolf_cov(Xc):
+    """
+    Analytic Ledoit-Wolf shrinkage toward a scaled identity target.
+
+    Xc must be mean-centered, shape (n_samples, n_bands). Returns
+    (shrunk_covariance, shrinkage_intensity).
+
+    Used instead of a fixed shrinkage constant because the appropriate amount
+    depends on the sample-to-band ratio, which varies per detector column.
+    Reference: Ledoit & Wolf (2004), J. Multivariate Analysis 88, 365-411.
+    """
+    n, p = Xc.shape
+    S = (Xc.T @ Xc) / n
+    mu_t = np.trace(S) / p
+    F = mu_t * np.eye(p)
+
+    delta = np.sum((S - F) ** 2)
+    if delta <= 0:
+        return S, 0.0
+
+    norms = np.sum(Xc ** 2, axis=1)                 # x_k' x_k per sample
+    beta2 = (np.sum(norms ** 2) / n - np.sum(S ** 2)) / n
+    beta2 = max(0.0, min(beta2, delta))
+
+    lam = beta2 / delta
+    return (1 - lam) * S + lam * F, float(lam)
+
+
+def matched_filter_columnwise(rad, wl, k, wl_min=WL_MIN, wl_max=WL_MAX,
+                              shrink=None, standardize=False, min_extra=10,
+                              progress=False):
+    """
+    Per-detector-column matched filter.
+
+    Tanager is a push-broom sensor: each cross-track sample is read out by its
+    own detector column with its own gain and dark offset. A scene-wide
+    covariance treats that fixed-pattern structure as signal, so the top of the
+    score distribution fills with vertical striping. Estimating background
+    statistics per column removes it. Standard practice for AVIRIS, EMIT and
+    PRISMA.
+
+    Parameters
+    ----------
+    rad : (bands, lines, samples) radiance cube, NaN for fill
+    wl  : (bands,) wavelengths in nm
+    k   : (n_swir,) CH4 absorption coefficients on the SWIR band centers.
+          Build it from swir_matrix(rad, wl)[1] - do not assume a band count.
+    shrink : None for analytic Ledoit-Wolf per column (recommended), or a float
+          in [0, 1] for a fixed intensity.
+    standardize : if True, z-score each column's scores after filtering. Makes a
+          global percentile threshold behave sensibly when residual per-column
+          variance differs, at the cost of physical interpretability.
+
+    Notes
+    -----
+    The target is deliberately NOT unit-normalized. With t = -k*mu the filter
+    output estimates the absorption amplitude directly, so scores are comparable
+    across columns. Unit-normalizing per column would rescale scores by
+    ||k*mu_j||, making bright columns score higher for identical gas and biasing
+    any global percentile threshold toward them.
+
+    Returns
+    -------
+    mf     : (lines, samples) score, NaN where invalid. Positive => absorption.
+    wl_s   : (n_swir,) wavelengths used
+    info   : dict with per-column shrinkage and count of skipped columns
+    """
+    sel = (wl >= wl_min) & (wl <= wl_max)
+    wl_s = wl[sel]
+    cube = rad[sel]
+    nb, nl, ns = cube.shape
+
+    if len(k) != nb:
+        raise ValueError(
+            f"k has {len(k)} bands but the {wl_min}-{wl_max} nm window selects "
+            f"{nb}. Build k from swir_matrix(rad, wl)[1]."
+        )
+
+    mf = np.full((nl, ns), np.nan)
+    lambdas = np.full(ns, np.nan)
+    skipped = 0
+
+    for j in range(ns):
+        Xc = cube[:, :, j].T
+        ok = ~np.any(np.isnan(Xc), axis=1)
+        if ok.sum() < nb + min_extra:
+            skipped += 1
+            continue
+
+        Xv = Xc[ok]
+        mu = Xv.mean(axis=0)
+        Xd = Xv - mu
+
+        if shrink is None:
+            S, lam = ledoit_wolf_cov(Xd)
+        else:
+            S0 = np.cov(Xd.T)
+            S = (1 - shrink) * S0 + shrink * np.trace(S0) / nb * np.eye(nb)
+            lam = float(shrink)
+        lambdas[j] = lam
+
+        try:
+            Si = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            skipped += 1
+            continue
+
+        t = -k * mu                      # NOT unit-normalized; see Notes
+        Si_t = Si @ t
+        denom = t @ Si_t
+        if not np.isfinite(denom) or denom == 0:
+            skipped += 1
+            continue
+
+        scores = (Xd @ Si_t) / denom
+        if standardize:
+            sd = scores.std()
+            scores = (scores - scores.mean()) / sd if sd > 0 else scores * 0.0
+        mf[ok, j] = scores
+
+        if progress and j % 100 == 0:
+            print(f"  column {j}/{ns}")
+
+    info = {
+        "shrinkage_mean": float(np.nanmean(lambdas)),
+        "shrinkage_min": float(np.nanmin(lambdas)),
+        "shrinkage_max": float(np.nanmax(lambdas)),
+        "columns_skipped": skipped,
+        "standardized": standardize,
+    }
+    return mf, wl_s, info
+
+
+def score_at_coords(mf, lat, lon, targets):
+    """
+    Read MF score and scene percentile at published plume coordinates.
+
+    targets : iterable of (label, lat, lon)
+    Returns a list of dicts. `percentile` is the fraction of valid pixels the
+    target outranks - the measurement that says whether the filter finds
+    plumes that are known to be present.
+    """
+    finite = np.isfinite(mf)
+    n_valid = int(finite.sum())
+    out = []
+
+    for label_, tlat, tlon in targets:
+        d = np.sqrt((lat - tlat) ** 2 + (lon - tlon) ** 2)
+        r_i, c_i = np.unravel_index(np.nanargmin(d), d.shape)
+        score = mf[r_i, c_i]
+
+        # Approximate great-circle offset to the nearest pixel center
+        dlat = (lat[r_i, c_i] - tlat) * 111.32
+        dlon = (lon[r_i, c_i] - tlon) * 111.32 * np.cos(np.radians(tlat))
+        offset_km = float(np.hypot(dlat, dlon))
+
+        pct = (float(np.nansum(mf[finite] < score)) / n_valid * 100
+               if np.isfinite(score) else np.nan)
+
+        out.append({
+            "label": label_, "row": int(r_i), "col": int(c_i),
+            "offset_km": round(offset_km, 3),
+            "mf_score": None if not np.isfinite(score) else round(float(score), 4),
+            "percentile": None if not np.isfinite(score) else round(pct, 3),
+            "in_frame": bool(0 < r_i < mf.shape[0] - 1 and 0 < c_i < mf.shape[1] - 1
+                             and offset_km < 1.0),
+        })
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Validation
 # ══════════════════════════════════════════════════════════════════════════
