@@ -202,6 +202,17 @@ lag-optimized correlation), and `mask_radius()` — exist only as notebook cells
 and `grow()` is defined twice. They are not importable, not tested, and not
 reusable. They belong in `tanager_diagnostics.py`; see Open questions.
 
+## Note on notebooks 03-05
+
+Notebooks 04 and 05 are superseded and should not be run. They quantify and
+attribute detections that notebook 06 shows to be carbonate soil rather than
+methane, and notebook 05's EPA endpoint returns an empty body that the parser
+reads as "no facilities found". Their outputs (29.5 kg/hr across four Permian
+clusters, and the associated attribution table) appear in the paper only as the
+false positive described in §4.4.
+
+Current pipeline: 03 (detection) → 06 (validation) → 07 (positive control).
+
 ## Reproducing
 
 ```bash
