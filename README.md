@@ -1,5 +1,7 @@
 # Detecting Methane Point Sources in Tanager-1 Hyperspectral Imagery
 
+**Paper:** [Detection Without Confirmation](https://docs.google.com/document/d/1FZ2c9nG0uTwahH6xBKYVbyyvHY-5BhbxwG-_FQLOvMw/edit)
+
 A matched-filter CH₄ detection pipeline for Planet Tanager-1 open data, with a
 validation chain for separating gas absorption from surface mineralogy.
 
